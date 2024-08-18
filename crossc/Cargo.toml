@@ -2,6 +2,8 @@
 name = "crossc"
 version = "0.1.0"
 edition = "2021"
+description = "crosscall cli"
+license = "MIT"
 
 [dependencies]
 anyhow = { version = "1.0.86", features = ["backtrace"] }
