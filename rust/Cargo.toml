@@ -1,0 +1,15 @@
+[package]
+name = "crosscall"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "dart and rust ffi call"
+
+[dependencies]
+allo-isolate = "0.1"
+parking_lot = "0.12"
+prost = "0.13"
+tokio = { version = "1.39", features = ["sync", "rt", "rt-multi-thread"] }
+tokio-stream = "0.1"
+tonic = "0.12"
+tracing = "0.1"

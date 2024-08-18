@@ -1,0 +1,13 @@
+[package]
+name = "crossc"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { version = "1.0.86", features = ["backtrace"] }
+cfg-if = "1.0.0"
+clap = { version = "4.5.16", features = ["derive"] }
+derive-new = "0.6.0"
+home = "0.5.9"
+serde = { version = "1.0.208", features = ["derive"] }
+toml = "0.8.19"
