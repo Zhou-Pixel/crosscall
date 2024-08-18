@@ -1,7 +1,6 @@
 use std::{
     path::{Path, PathBuf},
     process,
-    str::FromStr,
 };
 
 use anyhow::Context;
@@ -19,41 +18,52 @@ struct Command {
 #[derive(Parser, Debug)]
 enum SubCommand {
     Gen {
-        dart: Option<PathBuf>,
+        // #[arg(long)]
+        // flutter: Option<PathBuf>,
+
+        #[arg(long)]
+        protoc: Option<PathBuf>,
+
+        #[arg(long)]
+        watch: bool,
     },
-    Tem {},
+    // Tem {},
     New {
         #[arg(long)]
-        dart: Option<PathBuf>,
+        flutter: Option<PathBuf>,
+
+        #[arg(long)]
+        protoc: Option<PathBuf>,
+
         project_name: String,
     },
 }
 
-fn check_flutter_version(path: &str) -> anyhow::Result<()> {
-    let mut cmd = process::Command::new(path);
-    cmd.arg("--version");
+// fn check_flutter_version(path: &str) -> anyhow::Result<()> {
+//     let mut cmd = process::Command::new(path);
+//     cmd.arg("--version");
 
-    let output = cmd.output()?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "Failed to execute: {} --version:\n{}",
-            path,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+//     let output = cmd.output()?;
+//     if !output.status.success() {
+//         anyhow::bail!(
+//             "Failed to execute: {} --version:\n{}",
+//             path,
+//             String::from_utf8_lossy(&output.stderr)
+//         );
+//     }
 
-    Ok(())
-}
+//     Ok(())
+// }
 
-fn create_flutter_project(path: &str, project_name: &str) -> anyhow::Result<()> {
-    let mut cmd = process::Command::new(path);
-    cmd.arg("create");
-    cmd.arg(project_name);
+// fn create_flutter_project(path: &str, project_name: &str) -> anyhow::Result<()> {
+//     let mut cmd = process::Command::new(path);
+//     cmd.arg("create");
+//     cmd.arg(project_name);
 
-    cmd.output()?;
+//     cmd.output()?;
 
-    Ok(())
-}
+//     Ok(())
+// }
 
 #[derive(new)]
 pub struct Flutter {
@@ -86,6 +96,17 @@ impl Flutter {
         Ok(())
     }
 
+    fn add_package(&self, package: &str) -> anyhow::Result<()> {
+        let mut cmd = self.command();
+
+        cmd.arg("pub");
+        cmd.arg("add");
+
+        cmd.arg(package);
+
+        self.exec_command(&mut cmd)
+    }
+
     fn add_crosscall(&self) -> anyhow::Result<()> {
         let mut cmd = self.command();
 
@@ -94,6 +115,10 @@ impl Flutter {
         cmd.arg("crosscall");
 
         self.exec_command(&mut cmd)
+    }
+
+    fn cd(&mut self, path: PathBuf) {
+        self.cwd = path;
     }
 
     fn exec_command(&self, cmd: &mut process::Command) -> anyhow::Result<()> {
@@ -111,9 +136,10 @@ impl Flutter {
             let cwd = cmd.get_current_dir().unwrap_or(&self.cwd);
 
             anyhow::bail!(
-                "Failed to exec <{}> in <{}>",
+                "Failed to exec <{}> in <{}>:\n{}",
                 cmd_line,
-                cwd.to_string_lossy()
+                cwd.to_string_lossy(),
+                String::from_utf8_lossy(&output.stderr)
             );
         }
 
@@ -127,7 +153,7 @@ fn exec_command(cmd: &mut process::Command) -> anyhow::Result<()> {
         let args = cmd.get_args();
         let program = cmd.get_program();
         let cmd_line = format!(
-            "{}:{}",
+            "{} {}",
             program.to_string_lossy(),
             args.collect::<Vec<_>>()
                 .join(std::ffi::OsStr::new(" "))
@@ -139,11 +165,6 @@ fn exec_command(cmd: &mut process::Command) -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-enum LineBreaks {
-    Unix,
-    Windows,
 }
 
 #[derive(new, Debug)]
@@ -235,6 +256,77 @@ include = []
         Ok(())
     }
 
+    fn generate_native_hub_build_rs(&self, protobuf: &[Protobuf]) -> anyhow::Result<()> {
+        let mut content = String::from("fn main() {\n");
+
+        for i in protobuf {
+            let mut include = vec![];
+            let mut files = vec![];
+
+            for file in i.file.iter() {
+                let mut empty = true;
+                for path in glob::glob(&file)? {
+                    empty = false;
+
+                    let path = path?;
+                    let path = PathBuf::new()
+                        .join("..")
+                        .join("..")
+                        .join(path);
+
+                    if let Some(parent) = path.parent() {
+                        include.push(parent.to_path_buf());
+                    }
+
+                    files.push(path);
+                }
+                if empty {
+                    tracing::warn!("Path: {} doest't containt any file", file);
+                }
+            }
+            for inc in i.include.iter() {
+                include.push(
+                    PathBuf::new()
+                        .join("..")
+                        .join("..")
+                        .join(inc)
+                );
+            }
+            let mut out = String::new();
+            if let Some(ref output) = i.rust_output {
+                out = format!(
+                    ".out_dir(\"{}\")",
+                    PathBuf::new()
+                        .join("..")
+                        .join("..")
+                        .join(output)
+                        .to_string_lossy()
+                );
+            }
+            content.push_str(
+                format!(
+                    "tonic_build::configure(){}.compile(&[{}], &[{}]).unwrap();\n",
+                    out,
+                    files
+                        .iter()
+                        .map(|v| format!("\"{}\"", v.to_string_lossy()))
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    include
+                        .iter()
+                        .map(|v| format!("\"{}\"", v.to_string_lossy()))
+                        .collect::<Vec<_>>()
+                        .join(","),
+                )
+                .as_str(),
+            );
+        }
+
+        content.push_str("}\n");
+        std::fs::write(self.native_hub_dir().join("build.rs"), content)?;
+        Ok(())
+    }
+
     fn create_native_hub_build_rs(&self) -> anyhow::Result<()> {
         let content = r#"
 fn main() {
@@ -321,9 +413,12 @@ async fn start() {
     }
 }
 
+#[derive(new)]
 pub struct ProtobufCompiler {
     exe: PathBuf,
     cwd: PathBuf,
+
+    #[new(default)]
     env_path: Vec<PathBuf>,
 }
 
@@ -365,21 +460,80 @@ impl ProtobufCompiler {
         cmd
     }
 
+    fn compile_dart_config(&self, protobuf: &[Protobuf]) -> anyhow::Result<()> {
+        for i in protobuf {
+            let mut include = vec![];
+            let mut files = vec![];
+
+            for file in i.file.iter() {
+                let mut empty = true;
+                for path in glob::glob(&file)? {
+                    empty = false;
+
+                    let path = path?;
+
+                    if let Some(parent) = path.parent() {
+                        include.push(parent.to_path_buf());
+                    }
+
+                    files.push(path);
+                }
+                if empty {
+                    tracing::warn!("Path: {} doest't containt any file", file);
+                }
+            }
+            let mut cmd = self.compiler();
+
+            include.extend(i.include.clone());
+
+            for inc in include.iter() {
+                cmd.arg(format!("--proto_path={}", inc.to_string_lossy()));
+            }
+
+            for file in files {
+                cmd.arg(file);
+            }
+
+            cmd.arg(format!(
+                "--dart_out=grpc:{}",
+                i.dart_output.to_string_lossy()
+            ));
+
+            std::fs::create_dir_all(&i.dart_output)?;
+
+            exec_command(&mut cmd)?;
+        }
+
+        Ok(())
+    }
+
     fn compile_dart(
         &self,
         file: &[impl AsRef<Path>],
+        include: &[impl AsRef<Path>],
         output: impl AsRef<Path>,
     ) -> anyhow::Result<()> {
         let mut cmd = self.compiler();
 
+        let mut include = include.iter().map(|v| v.as_ref()).collect::<Vec<_>>();
+
         for i in file {
             cmd.arg(i.as_ref());
+            if let Some(parent) = i.as_ref().parent() {
+                include.push(parent);
+            }
+        }
+
+        for i in include {
+            cmd.arg(format!("--proto_path={}", i.to_string_lossy()));
         }
 
         cmd.arg(format!(
             "--dart_out=grpc:{}",
             output.as_ref().to_string_lossy()
         ));
+
+        std::fs::create_dir_all(self.cwd.join(output.as_ref()))?;
 
         exec_command(&mut cmd)
     }
@@ -397,10 +551,11 @@ fn env_spec() -> &'static str {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 struct CrosscallConfig {
     generate_dart: bool,
     generate_rust: bool,
-    proto: Vec<Protobuf>,
+    protobuf: Vec<Protobuf>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -420,8 +575,31 @@ fn main() -> anyhow::Result<()> {
     let cmd = Command::parse();
 
     match cmd.sub {
-        SubCommand::New { dart, project_name } => {
-            new_project(dart.unwrap_or(PathBuf::new().join("flutter")), project_name)?
+        SubCommand::New {
+            flutter,
+            protoc,
+            project_name,
+        } => {
+            let flutter = match flutter {
+                Some(flutter) => flutter,
+                None => which::which("flutter")?,
+            };
+            let protoc = match protoc {
+                Some(protoc) => protoc,
+                None => which::which("protoc")?,
+            };
+            new_project(flutter, protoc, project_name)?
+        }
+        SubCommand::Gen {
+            // flutter,
+            protoc,
+            watch,
+        } => {
+            let protoc = match protoc {
+                Some(protoc) => protoc,
+                None => which::which("protoc")?,
+            };
+            generate_project(protoc)?;
         }
         _ => todo!(),
     }
@@ -429,7 +607,28 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn new_project(dart: PathBuf, project_name: String) -> anyhow::Result<()> {
+fn generate_project(protoc: PathBuf) -> anyhow::Result<()> {
+    let current_dir = std::env::current_dir()?;
+    let path = current_dir.join("crosscall.toml");
+
+    let config = std::fs::read(path)?;
+    let config = String::from_utf8(config)?;
+
+    let config: CrosscallConfig = toml::from_str(&config)?;
+
+    if config.generate_dart {
+        let compiler = ProtobufCompiler::new(protoc, current_dir.clone());
+        compiler.compile_dart_config(&config.protobuf)?;
+    }
+    if config.generate_rust {
+        let temp = Template::new(current_dir);
+        temp.generate_native_hub_build_rs(&config.protobuf)?;
+    }
+
+    Ok(())
+}
+
+fn new_project(dart: PathBuf, protoc: PathBuf, project_name: String) -> anyhow::Result<()> {
     let current_dir = std::env::current_dir()?;
     let mut flutter = Flutter::new(dart, current_dir.clone());
 
@@ -437,7 +636,13 @@ fn new_project(dart: PathBuf, project_name: String) -> anyhow::Result<()> {
 
     flutter.create_project(&project_name)?;
 
-    let temp = Template::new(current_dir.join(project_name));
+    flutter.cd(current_dir.join(&project_name));
+
+    flutter.add_crosscall()?;
+    flutter.add_package("grpc")?;
+    flutter.add_package("protobuf")?;
+
+    let temp = Template::new(current_dir.join(&project_name));
 
     temp.create_workspace_cargo_toml()?;
     temp.create_native_hub()?;
@@ -450,6 +655,14 @@ fn new_project(dart: PathBuf, project_name: String) -> anyhow::Result<()> {
     temp.create_proto_dir()?;
 
     temp.create_calculate()?;
+
+    let mut protoc = ProtobufCompiler::new(protoc, current_dir.join(&project_name));
+
+    protoc.add_dart_plugin_path()?;
+
+    protoc.check_version()?;
+
+    protoc.compile_dart(&["rpc/calculate.proto"], &[] as &[PathBuf], "lib/rpc")?;
 
     Ok(())
 }

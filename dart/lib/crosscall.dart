@@ -5,6 +5,7 @@ library;
 
 import 'dart:async';
 import 'dart:ffi';
+import 'dart:io';
 import 'dart:isolate';
 
 import 'package:ffi/ffi.dart';
@@ -478,7 +479,23 @@ class Config {
   Config({required this.libPath, this.rustWorkerThread});
 }
 
-Config _defaultConfig = Config(libPath: "libhub.so");
+Config _defaultConfig = Config(libPath: defaultLibrayPath());
+
+String defaultLibrayPath() {
+  if (Platform.isLinux) {
+    return 'libhub.so';
+  } else if (Platform.isAndroid) {
+    return 'libhub.so';
+  } else if (Platform.isWindows) {
+    return 'hub.dll';
+  } else if (Platform.isIOS) {
+    return 'crosscall.framework/crosscall';
+  } else if (Platform.isMacOS) {
+    return 'crosscall.framework/crosscall';
+  } else {
+    throw UnsupportedError('Unsupport os.');
+  }
+}
 
 void setConfig(Config config) {
   _defaultConfig = config;
