@@ -274,7 +274,7 @@ include = []
 
             for file in i.file.iter() {
                 let mut empty = true;
-                for path in glob::glob(&file)? {
+                for path in glob::glob(file)? {
                     empty = false;
 
                     let path = path?;
@@ -345,7 +345,8 @@ fn main() {
     }
 
     fn create_native_hub_cargo_toml(&self) -> anyhow::Result<()> {
-        let content = format!(r#"
+        let content = format!(
+            r#"
 [package]
 name = "hub"
 version = "0.1.0"
@@ -363,7 +364,9 @@ tonic-build = "*"
 [lib]
 crate-type = ["lib", "cdylib", "staticlib"]
 
-        "#, env!("CARGO_PKG_VERSION"));
+        "#,
+            env!("CARGO_PKG_VERSION")
+        );
 
         let path = self.native_hub_dir().join("Cargo.toml");
 
@@ -373,9 +376,7 @@ crate-type = ["lib", "cdylib", "staticlib"]
     }
 
     fn rewrite_main_dart(&self) -> anyhow::Result<()> {
-
-        let content = 
-        r#"
+        let content = r#"
 import 'package:crosscall/crosscall.dart';
 import 'package:flutter/material.dart';
 import './rpc/calculate.pbgrpc.dart';
@@ -608,7 +609,7 @@ impl ProtobufCompiler {
 
             for file in i.file.iter() {
                 let mut empty = true;
-                for path in glob::glob(&file)? {
+                for path in glob::glob(file)? {
                     empty = false;
 
                     let path = path?;
@@ -771,8 +772,7 @@ fn main() -> anyhow::Result<()> {
             };
 
             check_toolchain(flutter, protoc)?;
-        }
-        _ => todo!(),
+        } // _ => todo!(),
     }
 
     Ok(())
@@ -821,7 +821,7 @@ fn watch_project(protoc: PathBuf) -> anyhow::Result<()> {
 
             for file in i.file.iter() {
                 let mut empty = true;
-                for path in glob::glob(&file)? {
+                for path in glob::glob(file)? {
                     empty = false;
 
                     let path = path?;
@@ -836,7 +836,6 @@ fn watch_project(protoc: PathBuf) -> anyhow::Result<()> {
             for i in files {
                 wathcer.watch(&i, notify::RecursiveMode::NonRecursive)?;
             }
-
         }
 
         tracing::info!("Watching files ...");
@@ -844,11 +843,11 @@ fn watch_project(protoc: PathBuf) -> anyhow::Result<()> {
         match event {
             Ok(event) => {
                 tracing::trace!("Files change: {:?}", event);
-            },
+            }
             Err(err) => {
                 tracing::error!("Error occurr: {:?}", err);
                 std::process::exit(1);
-            },
+            }
         }
     }
 
@@ -942,7 +941,6 @@ fn new_project(dart: PathBuf, protoc: PathBuf, project_name: String) -> anyhow::
 
     tracing::info!("Adding flutter dependency: protobuf ...");
     flutter.add_package("protobuf")?;
-
 
     let temp = Template::new(current_dir.join(&project_name));
 

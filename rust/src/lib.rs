@@ -340,7 +340,6 @@ impl Drop for MemoryListener {
     }
 }
 
-
 impl MemoryListener {
     pub fn port(&self) -> u32 {
         self.id
@@ -485,10 +484,8 @@ pub unsafe extern "C" fn crosscall_write_to_rust(data: *mut u8, len: usize) {
 
 static GLOBAL: OnceLock<Global> = OnceLock::new();
 
-
 #[no_mangle]
 pub extern "C" fn crosscall_destroy() {
-    
     let (sender, mut receiver) = mpsc::channel(128);
 
     let g = GLOBAL.get().unwrap();
@@ -501,26 +498,23 @@ pub extern "C" fn crosscall_destroy() {
     if let Some(rt) = g.runtime.write().take() {
         rt.shutdown_background();
     }
-
 }
 
 #[no_mangle]
 pub extern "C" fn crosscall_rust_initialize(port: i64, thread: u32) {
     let isolate = parking_lot::Mutex::new(Isolate::new(port));
 
-    let runtime = if thread == 1 {
-        tokio::runtime::Builder::new_current_thread()
+    let runtime = match thread {
+        0 => tokio::runtime::Builder::new_multi_thread()
             .enable_all()
-            .build()
-    } else if thread > 1 {
-        tokio::runtime::Builder::new_multi_thread()
+            .build(),
+        1 => tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build(),
+        2.. => tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .worker_threads(thread as usize)
-            .build()
-    } else {
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
+            .build(),
     };
 
     let g = Global {
@@ -530,7 +524,9 @@ pub extern "C" fn crosscall_rust_initialize(port: i64, thread: u32) {
         listener: Default::default(),
         request_id: Default::default(),
         shutdown: broadcast::channel(128).0,
-        runtime: parking_lot::RwLock::new(Some(runtime.expect("Failed to start tokio async runtime"))),
+        runtime: parking_lot::RwLock::new(Some(
+            runtime.expect("Failed to start tokio async runtime"),
+        )),
     };
 
     // let guard = g.runtime.enter();
@@ -541,7 +537,6 @@ pub extern "C" fn crosscall_rust_initialize(port: i64, thread: u32) {
     // drop(guard);
     GLOBAL.set(g).expect("Failed to set global resource");
 }
-
 
 #[doc(hidden)]
 #[inline]
@@ -555,11 +550,11 @@ where
     let guard = rt.as_ref().unwrap().enter();
 
     let mut receiver = g.shutdown.subscribe();
-    
+
     let res = tokio::spawn(async move {
         tokio::select! {
             res = future => {
-               Some(res) 
+               Some(res)
             }
             res = receiver.recv() => {
                 let sender = match res {
@@ -575,7 +570,6 @@ where
             }
         }
     });
-
 
     drop(guard);
 
