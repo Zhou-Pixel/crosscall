@@ -9,7 +9,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    sync::{mpsc, oneshot},
+    sync::{broadcast, mpsc, oneshot},
     task::JoinHandle,
 };
 
@@ -29,11 +29,12 @@ mod protocol;
 #[derive(Debug)]
 struct Global {
     isolate: parking_lot::Mutex<Isolate>, // maybe we can remove mutex here ??
-    waiter: parking_lot::Mutex<HashMap<u32, oneshot::Sender<protocol::response::Msg>>>,
-    streams: parking_lot::RwLock<HashMap<u32, Option<mpsc::UnboundedSender<Vec<u8>>>>>,
+    waiter: parking_lot::Mutex<HashMap<u32, Waiter>>,
+    streams: parking_lot::RwLock<HashMap<u32, mpsc::UnboundedSender<Vec<u8>>>>,
     listener: parking_lot::Mutex<HashMap<u32, mpsc::UnboundedSender<MemoryStream>>>,
     request_id: parking_lot::Mutex<u32>,
-    runtime: tokio::runtime::Runtime,
+    shutdown: broadcast::Sender<mpsc::Sender<()>>,
+    runtime: parking_lot::RwLock<Option<tokio::runtime::Runtime>>,
 }
 
 impl Global {
@@ -44,7 +45,7 @@ impl Global {
         id
     }
 
-    fn insert_waiter(&self, id: u32, sender: oneshot::Sender<protocol::response::Msg>) {
+    fn insert_waiter(&self, id: u32, sender: Waiter) {
         self.waiter.lock().insert(id, sender);
     }
 
@@ -57,7 +58,7 @@ impl Global {
             }
         }
 
-        lock.insert(id, Some(sender));
+        lock.insert(id, sender);
         id
     }
 
@@ -116,33 +117,34 @@ impl Global {
         let lock = self.streams.read();
         let stream = lock.get(&id);
 
-        if let Some(Some(stream)) = stream {
+        if let Some(stream) = stream {
             return stream.send(data).is_ok();
         }
         tracing::error!("Try to send data to a non-exist stream id: {}", id);
         false
     }
 
-    fn close_stream(&self, id: u32) -> Option<mpsc::UnboundedSender<Vec<u8>>> {
-        let mut lock = self.streams.write();
-        let stream = lock.get_mut(&id);
+    // fn close_stream(&self, id: u32) -> Option<mpsc::UnboundedSender<Vec<u8>>> {
+    //     let mut lock = self.streams.write();
+    //     let stream = lock.get_mut(&id);
 
-        if let Some(stream) = stream {
-            // return stream.as_ref().unwrap().send(data).is_ok();
-            return std::mem::take(stream);
-        }
-        None
-    }
+    //     if let Some(stream) = stream {
+    //         // return stream.as_ref().unwrap().send(data).is_ok();
+    //         return std::mem::take(stream);
+    //     }
+    //     None
+    // }
 
     fn remove_stream(&self, id: u32) -> Option<mpsc::UnboundedSender<Vec<u8>>> {
-        self.streams.write().remove(&id)?
+        self.streams.write().remove(&id)
     }
 }
 
 pub struct MemoryStream {
     id: u32,
     receiver: mpsc::UnboundedReceiver<Vec<u8>>,
-    write_receiver: Option<oneshot::Receiver<protocol::response::Msg>>,
+    write_waiter: Option<oneshot::Receiver<protocol::response::Msg>>,
+    shutdown_waiter: Option<oneshot::Receiver<protocol::response::Msg>>,
     buf: BytesMut,
 }
 
@@ -190,10 +192,10 @@ impl AsyncWrite for MemoryStream {
         buf: &[u8],
     ) -> std::task::Poll<Result<usize, std::io::Error>> {
         loop {
-            if let Some(ref mut receiver) = self.write_receiver {
+            if let Some(ref mut receiver) = self.write_waiter {
                 return match ready!(Pin::new(receiver).poll(cx)) {
                     Ok(msg) => {
-                        self.write_receiver = None;
+                        self.write_waiter = None;
                         match msg {
                             protocol::response::Msg::Ok(_) => Poll::Ready(Ok(buf.len())),
                             protocol::response::Msg::Error(error) => Poll::Ready(Err(
@@ -202,14 +204,13 @@ impl AsyncWrite for MemoryStream {
                         }
                     }
                     Err(err) => {
-                        self.write_receiver = None;
+                        self.write_waiter = None;
                         Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, err)))
                     }
                 };
             }
             let (sender, receiver) = oneshot::channel();
-            let lock = GLOBAL.read();
-            let g = lock.get().unwrap();
+            let g = GLOBAL.get().unwrap();
             let id = g.generate_id();
             let msg = protocol::Request {
                 id,
@@ -218,9 +219,9 @@ impl AsyncWrite for MemoryStream {
                     channel_id: self.id,
                 })),
             };
-            g.insert_waiter(id, sender);
+            g.insert_waiter(id, Waiter::sender(sender));
             g.send_request_to_dart(msg);
-            self.write_receiver = Some(receiver);
+            self.write_waiter = Some(receiver);
         }
         // GLOBAL.get().unwrap().insert_waiter(, sender)
         // GLOBAL.get().unwrap().send_channel_data(self.id, buf.to_vec());
@@ -234,16 +235,66 @@ impl AsyncWrite for MemoryStream {
     }
 
     fn poll_shutdown(
-        self: std::pin::Pin<&mut Self>,
-        _: &mut std::task::Context<'_>,
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), std::io::Error>> {
-        std::task::Poll::Ready(Ok(()))
+        loop {
+            if let Some(ref mut receiver) = self.shutdown_waiter {
+                let res = match ready!(Pin::new(receiver).poll(cx)) {
+                    Ok(msg) => match msg {
+                        protocol::response::Msg::Ok(_) => Poll::Ready(Ok(())),
+                        protocol::response::Msg::Error(error) => Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            format!("{:?}", error),
+                        ))),
+                    },
+                    Err(err) => Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, err))),
+                };
+
+                self.shutdown_waiter = None;
+
+                return res;
+            }
+            let g = GLOBAL.get().unwrap();
+            let id = g.generate_id();
+
+            let (sender, receiver) = oneshot::channel();
+
+            g.insert_waiter(id, Waiter::Sender(sender));
+
+            g.send_request_to_dart(protocol::Request {
+                id,
+                msg: Some(protocol::request::Msg::ChannelClose(
+                    protocol::ChannelClose {
+                        channel_id: self.id,
+                    },
+                )),
+            });
+            self.shutdown_waiter = Some(receiver);
+        }
     }
 }
 
-impl Drop for MemoryStream {
-    fn drop(&mut self) {
-        GLOBAL.read().get().unwrap().remove_stream(self.id);
+enum Waiter {
+    // Func(Box<dyn FnOnce(&Global, protocol::response::Msg) + Send + Sync>),
+    Sender(oneshot::Sender<protocol::response::Msg>),
+}
+
+impl Waiter {
+    // fn func(f: impl FnOnce(&Global, protocol::response::Msg) + Send + Sync + 'static) -> Self {
+    //     Self::Func(Box::new(f))
+    // }
+    fn sender(sender: oneshot::Sender<protocol::response::Msg>) -> Self {
+        Self::Sender(sender)
+    }
+}
+
+impl std::fmt::Debug for Waiter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // Self::Func(_) => write!(f, "Waiter::Func"),
+            Self::Sender(_) => write!(f, "Waiter::Sender"),
+        }
     }
 }
 
@@ -285,9 +336,10 @@ pub struct MemoryListener {
 
 impl Drop for MemoryListener {
     fn drop(&mut self) {
-        GLOBAL.read().get().unwrap().remove_listener(self.id);
+        GLOBAL.get().unwrap().remove_listener(self.id);
     }
 }
+
 
 impl MemoryListener {
     pub fn port(&self) -> u32 {
@@ -296,8 +348,7 @@ impl MemoryListener {
 
     pub fn bind(port: Option<u32>) -> io::Result<Self> {
         let (sender, receiver) = mpsc::unbounded_channel();
-        let lock = GLOBAL.read();
-        let g = lock.get().expect("Uninitlize");
+        let g = GLOBAL.get().expect("Uninitlize");
         let id = match port {
             Some(id) => {
                 let mut lock = g.listener.lock();
@@ -323,25 +374,24 @@ impl MemoryListener {
 #[doc(hidden)]
 #[no_mangle]
 pub unsafe extern "C" fn crosscall_write_to_rust(data: *mut u8, len: usize) {
-    let buf = unsafe { std::slice::from_raw_parts_mut(data, len) };
+    let buf = unsafe { std::slice::from_raw_parts(data, len) };
 
-    let msg = protocol::Message::decode(buf as &[u8]).unwrap();
+    let msg = protocol::Message::decode(buf).unwrap();
     match msg.msg {
         Some(protocol::message::Msg::Response(res)) => {
-            let Some(sender) = GLOBAL
-                .read()
-                .get()
-                .expect("Uninitialize")
-                .waiter
-                .lock()
-                .remove(&res.id)
-            else {
+            let g = GLOBAL.get().unwrap();
+            let Some(sender) = g.waiter.lock().remove(&res.id) else {
                 tracing::error!("No such waiter is waiting for response: {}", res.id);
                 return;
             };
             if let Some(msg) = res.msg {
-                if let Err(err) = sender.send(msg) {
-                    tracing::warn!("Failed to send response: {:?}", err);
+                match sender {
+                    // Waiter::Func(func) => func(g, msg),
+                    Waiter::Sender(sender) => {
+                        if let Err(err) = sender.send(msg) {
+                            tracing::warn!("Failed to send response: {:?}", err);
+                        }
+                    }
                 }
             } else {
                 tracing::error!("Got None msg in response");
@@ -355,14 +405,14 @@ pub unsafe extern "C" fn crosscall_write_to_rust(data: *mut u8, len: usize) {
                 Some(protocol::request::Msg::NewChannel(new_channel)) => {
                     let (sender, receiver) = mpsc::unbounded_channel();
 
-                    let lock = GLOBAL.read();
-                    let g = lock.get().unwrap();
+                    let g = GLOBAL.get().unwrap();
                     let id = g.insert_stream(sender);
 
                     let stream = MemoryStream {
                         id,
                         receiver,
-                        write_receiver: None,
+                        write_waiter: None,
+                        shutdown_waiter: None,
                         buf: Default::default(),
                     };
 
@@ -381,8 +431,8 @@ pub unsafe extern "C" fn crosscall_write_to_rust(data: *mut u8, len: usize) {
                         g.send_response_to_dart(protocol::Response {
                             id: req.id,
                             msg: Some(protocol::response::Msg::Error(protocol::Error {
-                                code: -1,
-                                msg: "Not bind".to_string(),
+                                code: protocol::error::Code::Unbind as _,
+                                msg: format!("Port {} is not bound", new_channel.listener_id),
                             })),
                         });
                     }
@@ -390,8 +440,7 @@ pub unsafe extern "C" fn crosscall_write_to_rust(data: *mut u8, len: usize) {
                     // g.send_response_to_dart(&protocol::Response { id, msg: })
                 }
                 Some(protocol::request::Msg::ChannelData(data)) => {
-                    let lock = GLOBAL.read();
-                    let g = lock.get().unwrap();
+                    let g = GLOBAL.get().unwrap();
                     if g.send_stream_data(data.channel_id, data.data) {
                         g.send_response_to_dart(protocol::Response {
                             id: req.id,
@@ -401,36 +450,58 @@ pub unsafe extern "C" fn crosscall_write_to_rust(data: *mut u8, len: usize) {
                         g.send_response_to_dart(protocol::Response {
                             id: req.id,
                             msg: Some(protocol::response::Msg::Error(protocol::Error {
-                                code: -2,
-                                msg: "Channel not found".to_string(),
+                                code: protocol::error::Code::ChannelNotFound as _,
+                                msg: format!("Channel: {} not found", data.channel_id),
                             })),
                         })
                     }
                 }
                 Some(protocol::request::Msg::ChannelClose(close)) => {
-                    if GLOBAL
-                        .read()
-                        .get()
-                        .unwrap()
-                        .close_stream(close.channel_id)
-                        .is_none()
-                    {
+                    let g = GLOBAL.get().unwrap();
+
+                    if g.remove_stream(close.channel_id).is_some() {
+                        g.send_response_to_dart(protocol::Response {
+                            id: req.id,
+                            msg: Some(protocol::response::Msg::Ok(protocol::Ok { msg: None })),
+                        })
+                    } else {
                         tracing::warn!("Try to close a non-exist stream: {}", close.channel_id);
+                        g.send_response_to_dart(protocol::Response {
+                            id: req.id,
+                            msg: Some(protocol::response::Msg::Error(protocol::Error {
+                                code: protocol::error::Code::ChannelNotFound as _,
+                                msg: format!("Channel: {} not found", close.channel_id),
+                            })),
+                        })
                     }
                 } // _ => {}
             }
         }
         None => {
-            tracing::error!("Got None message fro dart");
+            tracing::error!("Got None message from dart");
         }
     }
 }
 
-static GLOBAL: parking_lot::RwLock<OnceLock<Global>> = parking_lot::RwLock::new(OnceLock::new());
+static GLOBAL: OnceLock<Global> = OnceLock::new();
+
 
 #[no_mangle]
 pub extern "C" fn crosscall_destroy() {
-    GLOBAL.write().take();
+    
+    let (sender, mut receiver) = mpsc::channel(128);
+
+    let g = GLOBAL.get().unwrap();
+    if let Ok(size) = g.shutdown.send(sender) {
+        for _ in 0..size {
+            receiver.blocking_recv();
+        }
+    }
+
+    if let Some(rt) = g.runtime.write().take() {
+        rt.shutdown_background();
+    }
+
 }
 
 #[no_mangle]
@@ -458,7 +529,8 @@ pub extern "C" fn crosscall_rust_initialize(port: i64, thread: u32) {
         streams: Default::default(),
         listener: Default::default(),
         request_id: Default::default(),
-        runtime: runtime.expect("Failed to start tokio async runtime"),
+        shutdown: broadcast::channel(128).0,
+        runtime: parking_lot::RwLock::new(Some(runtime.expect("Failed to start tokio async runtime"))),
     };
 
     // let guard = g.runtime.enter();
@@ -467,20 +539,43 @@ pub extern "C" fn crosscall_rust_initialize(port: i64, thread: u32) {
 
     // });
     // drop(guard);
-    GLOBAL.read().set(g).expect("Failed to set global resource");
+    GLOBAL.set(g).expect("Failed to set global resource");
 }
 
+
+#[doc(hidden)]
 #[inline]
-pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
+pub fn spawn<F>(future: F) -> JoinHandle<Option<F::Output>>
 where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    let lock = GLOBAL.read();
-    let g = lock.get().unwrap();
-    let guard = g.runtime.enter();
+    let g = GLOBAL.get().unwrap();
+    let rt = g.runtime.read();
+    let guard = rt.as_ref().unwrap().enter();
 
-    let res = g.runtime.spawn(future);
+    let mut receiver = g.shutdown.subscribe();
+    
+    let res = tokio::spawn(async move {
+        tokio::select! {
+            res = future => {
+               Some(res) 
+            }
+            res = receiver.recv() => {
+                let sender = match res {
+                    Ok(sender) => sender,
+                    Err(err) => {
+                        tracing::error!("Failed to receiver from shutdown notify: {:?}", err);
+                        return None;
+                    },
+                };
+                let res = sender.send(()).await;
+                tracing::info!("reply to shutdown notify: {:?}", res);
+                None
+            }
+        }
+    });
+
 
     drop(guard);
 

@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+
+package protocol;
+
+message Request {
+    uint32 id = 1;
+    oneof msg {
+        NewChannel newChannel = 4;
+        ChannelClose channelClose = 2;
+        ChannelData channelData = 3;
+    }
+}
+message Response {
+    uint32 id = 1;
+    oneof msg {
+        Ok ok = 2;
+        Error error = 3;
+    }
+}
+message QueryListener {
+
+}
+message ListenerList {
+    repeated uint32 listenerList = 1;
+}
+message NewChannel {
+    uint32 listenerId = 1;
+}
+message ChannelId {
+    uint32 channelId = 2;
+}
+message ChannelClose {
+    uint32 channelId = 1;
+}
+message ChannelData {
+    bytes data = 1;
+    uint32 channelId = 2;
+}
+message Ok {
+    oneof msg {
+        ChannelId channelId = 1;
+    }
+}
+
+
+message Error {
+    enum Code {
+        Unbind = 0;
+        ChannelNotFound = 1;
+        
+    }
+    Code code = 1;
+    string msg = 2;
+}
+
+message Message {
+    oneof msg {
+        Request request = 1;
+        Response response = 2;
+    }
+}

@@ -1,6 +1,3 @@
-/// Support for doing something awesome.
-///
-/// More dartdocs go here.
 library;
 
 import 'dart:async';
@@ -133,14 +130,14 @@ class Global {
       var req = msg.request;
 
       if (req.whichMsg() == protocol.Request_Msg.channelClose) {
-        var stream = _streams[req.channelClose.channelId];
+        var stream = _streams.remove(req.channelClose.channelId);
         if (stream == null) {
           var response = protocol.Message(
               response: protocol.Response(
                   id: req.id,
                   error: protocol.Error(
-                      code: protocol.Error_Code.Unbind,
-                      msg: "Stream not found")));
+                      code: protocol.Error_Code.ChannelNotFound,
+                      msg: "Channel ${req.channelClose.channelId} not found")));
           _writeMessageToRust(response);
         } else {
           var response = protocol.Message(
@@ -155,7 +152,8 @@ class Global {
           response = protocol.Response(
               id: req.id,
               error: protocol.Error(
-                  code: protocol.Error_Code.Unbind, msg: "Channel not found"));
+                  code: protocol.Error_Code.ChannelNotFound,
+                  msg: "Channel ${data.channelId} not found"));
         } else {
           stream.add(data.data);
           response = protocol.Response(id: req.id, ok: protocol.Ok());
@@ -165,7 +163,6 @@ class Global {
       }
     } else if (msg.whichMsg() == protocol.Message_Msg.response) {
       var res = msg.response;
-
       _waiters.remove(res.id)!(this, res);
     } else if (msg.whichMsg() == protocol.Message_Msg.notSet) {
       throw Exception("Message not set");
@@ -241,7 +238,6 @@ class MemoryStream implements Stream<List<int>>, StreamSink<List<int>> {
 
         Global()._sendRequest(req, (global, res) {
           assert(res.id == req.id);
-          assert(res.whichMsg() == protocol.Response_Msg.ok);
         });
       },
       onDone: () {
@@ -254,8 +250,6 @@ class MemoryStream implements Stream<List<int>>, StreamSink<List<int>> {
 
         Global()._sendRequest(req, (global, res) {
           assert(res.id == req.id);
-          print(
-              "response: ${res.toDebugString()} from request: ${req.toDebugString()}}");
         });
       },
       onError: (Object Error) {

@@ -1,6 +1,6 @@
 //
 //  Generated code. Do not modify.
-//  source: proto/protocol.proto
+//  source: protocol.proto
 //
 // @dart = 2.12
 
@@ -15,9 +15,11 @@ import 'package:protobuf/protobuf.dart' as $pb;
 
 class Error_Code extends $pb.ProtobufEnum {
   static const Error_Code Unbind = Error_Code._(0, _omitEnumNames ? '' : 'Unbind');
+  static const Error_Code ChannelNotFound = Error_Code._(1, _omitEnumNames ? '' : 'ChannelNotFound');
 
   static const $core.List<Error_Code> values = <Error_Code> [
     Unbind,
+    ChannelNotFound,
   ];
 
   static final $core.Map<$core.int, Error_Code> _byValue = $pb.ProtobufEnum.initByValue(values);

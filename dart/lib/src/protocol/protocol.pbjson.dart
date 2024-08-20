@@ -1,6 +1,6 @@
 //
 //  Generated code. Do not modify.
-//  source: proto/protocol.proto
+//  source: protocol.proto
 //
 // @dart = 2.12
 
@@ -154,13 +154,14 @@ const Error_Code$json = {
   '1': 'Code',
   '2': [
     {'1': 'Unbind', '2': 0},
+    {'1': 'ChannelNotFound', '2': 1},
   ],
 };
 
 /// Descriptor for `Error`. Decode as a `google.protobuf.DescriptorProto`.
 final $typed_data.Uint8List errorDescriptor = $convert.base64Decode(
     'CgVFcnJvchIoCgRjb2RlGAEgASgOMhQucHJvdG9jb2wuRXJyb3IuQ29kZVIEY29kZRIQCgNtc2'
-    'cYAiABKAlSA21zZyISCgRDb2RlEgoKBlVuYmluZBAA');
+    'cYAiABKAlSA21zZyInCgRDb2RlEgoKBlVuYmluZBAAEhMKD0NoYW5uZWxOb3RGb3VuZBAB');
 
 @$core.Deprecated('Use messageDescriptor instead')
 const Message$json = {
