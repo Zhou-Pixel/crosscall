@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     io::Write,
     path::{Path, PathBuf},
     process,
@@ -13,6 +14,7 @@ use notify::Watcher;
 use serde::{Deserialize, Serialize};
 
 #[derive(Parser, Debug)]
+#[command(version)]
 struct Command {
     #[command(subcommand)]
     sub: SubCommand,
@@ -170,7 +172,12 @@ fn exec_command(cmd: &mut process::Command) -> anyhow::Result<()> {
         );
         let cwd = cmd.get_current_dir().map(|v| v.to_string_lossy());
 
-        anyhow::bail!("Failed to exec <{}> in <{:?}>", cmd_line, cwd);
+        anyhow::bail!(
+            "Failed to exec <{}> in <{:?}>:\n{}",
+            cmd_line,
+            cwd,
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     Ok(())
@@ -269,7 +276,7 @@ include = []
         let mut content = String::from("fn main() {\n");
 
         for i in protobuf {
-            let mut include = vec![];
+            let mut include = HashSet::new();
             let mut files = vec![];
 
             for file in i.file.iter() {
@@ -281,7 +288,7 @@ include = []
                     let path = PathBuf::new().join("..").join("..").join(path);
 
                     if let Some(parent) = path.parent() {
-                        include.push(parent.to_path_buf());
+                        include.insert(parent.to_path_buf());
                     }
 
                     files.push(path);
@@ -291,7 +298,7 @@ include = []
                 }
             }
             for inc in i.include.iter() {
-                include.push(PathBuf::new().join("..").join("..").join(inc));
+                include.insert(PathBuf::new().join("..").join("..").join(inc));
             }
             let mut out = String::new();
             if let Some(ref output) = i.rust_output {
@@ -304,9 +311,15 @@ include = []
                         .to_string_lossy()
                 );
             }
+            let additional_code = if i.rust_tonic_additional_code.is_empty() {
+                "".to_string()
+            } else {
+                format!(".{}", i.rust_tonic_additional_code.join("."))
+            };
             content.push_str(
                 format!(
-                    "   tonic_build::configure(){}.compile(&[{}], &[{}]).unwrap();\n",
+                    "   tonic_build::configure(){}{}.compile(&[{}], &[{}] as &[&str]).unwrap();\n",
+                    additional_code,
                     out,
                     files
                         .iter()
@@ -604,7 +617,7 @@ impl ProtobufCompiler {
 
     fn compile_dart_config(&self, protobuf: &[Protobuf]) -> anyhow::Result<()> {
         for i in protobuf {
-            let mut include = vec![];
+            let mut include = HashSet::new();
             let mut files = vec![];
 
             for file in i.file.iter() {
@@ -615,7 +628,7 @@ impl ProtobufCompiler {
                     let path = path?;
 
                     if let Some(parent) = path.parent() {
-                        include.push(parent.to_path_buf());
+                        include.insert(parent.to_path_buf());
                     }
 
                     files.push(path);
@@ -629,7 +642,10 @@ impl ProtobufCompiler {
             include.extend(i.include.clone());
 
             for inc in include.iter() {
-                cmd.arg(format!("--proto_path={}", inc.to_string_lossy()));
+                let inc = inc.to_string_lossy();
+                if !inc.is_empty() {
+                    cmd.arg(format!("--proto_path={}", inc));
+                }
             }
 
             for file in files {
@@ -707,6 +723,8 @@ struct Protobuf {
     dart_output: PathBuf,
     rust_output: Option<PathBuf>,
     include: Vec<PathBuf>,
+    #[serde(default)]
+    rust_tonic_additional_code: Vec<String>,
 }
 
 fn default_dart_out_path() -> PathBuf {
@@ -758,13 +776,13 @@ fn main() -> anyhow::Result<()> {
             }
         }
         SubCommand::Check { flutter, protoc } => {
-            tracing::info!("Searching flutter ...");
+            tracing::info!("Searching flutter ");
             let flutter = match flutter {
                 Some(flutter) => flutter,
                 None => which::which("flutter")?,
             };
 
-            tracing::info!("Searching protoc ...");
+            tracing::info!("Searching protoc ");
 
             let protoc = match protoc {
                 Some(protoc) => protoc,
@@ -779,25 +797,36 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn watch_project(protoc: PathBuf) -> anyhow::Result<()> {
+    let current_dir = std::env::current_dir()?;
+    let path = current_dir.join("crosscall.toml");
     loop {
         tracing::info!("Generating project");
 
-        let current_dir = std::env::current_dir()?;
-        let path = current_dir.join("crosscall.toml");
+        let generate = || {
+            let config = std::fs::read(path.as_path())?;
+            let config = String::from_utf8(config)?;
 
-        let config = std::fs::read(path)?;
-        let config = String::from_utf8(config)?;
+            let config: CrosscallConfig = toml::from_str(&config)?;
 
-        let config: CrosscallConfig = toml::from_str(&config)?;
+            let compile = || {
+                if config.generate_dart {
+                    let compiler = ProtobufCompiler::new(protoc.clone(), current_dir.clone());
+                    compiler.compile_dart_config(&config.protobuf)?;
+                }
+                if config.generate_rust {
+                    let temp = Template::new(current_dir.clone());
+                    temp.generate_native_hub_build_rs(&config.protobuf)?;
+                }
+                anyhow::Ok(())
+            };
 
-        if config.generate_dart {
-            let compiler = ProtobufCompiler::new(protoc.clone(), current_dir.clone());
-            compiler.compile_dart_config(&config.protobuf)?;
-        }
-        if config.generate_rust {
-            let temp = Template::new(current_dir);
-            temp.generate_native_hub_build_rs(&config.protobuf)?;
-        }
+            if let Err(err) = compile() {
+                tracing::error!("Failed to generate files: {}", err);
+            }
+
+            anyhow::Ok(config)
+        };
+        let config = generate();
 
         tracing::info!("Finished");
         let (sender, receiver) = mpsc::channel();
@@ -809,43 +838,43 @@ fn watch_project(protoc: PathBuf) -> anyhow::Result<()> {
             }
         })?;
 
-        let current_dir = std::env::current_dir()?;
-
         wathcer.watch(
             current_dir.join("crosscall.toml").as_path(),
             notify::RecursiveMode::NonRecursive,
         )?;
 
-        for i in config.protobuf {
-            let mut files = vec![];
+        if let Ok(config) = config {
+            for i in config.protobuf {
+                let mut files = vec![];
 
-            for file in i.file.iter() {
-                let mut empty = true;
-                for path in glob::glob(file)? {
-                    empty = false;
+                for file in i.file.iter() {
+                    let mut empty = true;
+                    for path in glob::glob(file)? {
+                        empty = false;
 
-                    let path = path?;
+                        let path = path?;
 
-                    files.push(path);
+                        files.push(path);
+                    }
+                    if empty {
+                        tracing::warn!("Path: {} doest't containt any file", file);
+                    }
                 }
-                if empty {
-                    tracing::warn!("Path: {} doest't containt any file", file);
-                }
-            }
 
-            for i in files {
-                wathcer.watch(&i, notify::RecursiveMode::NonRecursive)?;
+                for i in files {
+                    wathcer.watch(&i, notify::RecursiveMode::NonRecursive)?;
+                }
             }
         }
 
-        tracing::info!("Watching files ...");
+        tracing::info!("Watching files ");
         let event = receiver.recv()?;
         match event {
             Ok(event) => {
                 tracing::trace!("Files change: {:?}", event);
             }
             Err(err) => {
-                tracing::error!("Error occurr: {:?}", err);
+                tracing::error!("Error ocurr: {:?}", err);
                 std::process::exit(1);
             }
         }
@@ -859,10 +888,10 @@ fn check_toolchain(flutter: PathBuf, protoc: PathBuf) -> anyhow::Result<()> {
 
     let flutter = Flutter::new(flutter, current_dir.clone());
 
-    tracing::info!("Checking flutter ...");
+    tracing::info!("Checking flutter ");
     flutter.check_version()?;
 
-    tracing::info!("Checking protoc ...");
+    tracing::info!("Checking protoc ");
 
     let mut protoc = ProtobufCompiler::new(protoc, current_dir);
 
@@ -892,7 +921,7 @@ service Hello {
         include.push(parent.to_path_buf());
     }
 
-    tracing::info!("Compiling example protobuf ...");
+    tracing::info!("Compiling example protobuf ");
 
     protoc.add_dart_plugin_path()?;
     protoc.compile_dart(&[file.path()], &include, dir.path())?;
@@ -925,41 +954,41 @@ fn new_project(dart: PathBuf, protoc: PathBuf, project_name: String) -> anyhow::
     let current_dir = std::env::current_dir()?;
     let mut flutter = Flutter::new(dart, current_dir.clone());
 
-    tracing::info!("Checking flutter...");
+    tracing::info!("Checking flutter");
     flutter.check_version()?;
 
-    tracing::info!("Creating flutter project: {} ...", project_name);
+    tracing::info!("Creating flutter project: {} ", project_name);
     flutter.create_project(&project_name)?;
 
     flutter.cd(current_dir.join(&project_name));
 
-    tracing::info!("Adding flutter dependency: crosscall ...");
+    tracing::info!("Adding flutter dependency: crosscall ");
     flutter.add_crosscall()?;
 
-    tracing::info!("Adding flutter dependency: grpc ...");
+    tracing::info!("Adding flutter dependency: grpc ");
     flutter.add_package("grpc")?;
 
-    tracing::info!("Adding flutter dependency: protobuf ...");
+    tracing::info!("Adding flutter dependency: protobuf ");
     flutter.add_package("protobuf")?;
 
     let temp = Template::new(current_dir.join(&project_name));
 
-    tracing::info!("Rewriting main.dart ...");
+    tracing::info!("Rewriting main.dart ");
     temp.rewrite_main_dart()?;
 
-    tracing::info!("Creating workspace Cargo.toml ...");
+    tracing::info!("Creating workspace Cargo.toml ");
     temp.create_workspace_cargo_toml()?;
 
-    tracing::info!("Creating rust crate ...");
+    tracing::info!("Creating rust crate ");
     temp.create_native_hub()?;
     temp.create_native_hub_cargo_toml()?;
     temp.create_native_hub_build_rs()?;
     temp.create_native_hub_lib_rs()?;
 
-    tracing::info!("Creating crosscall.toml ...");
+    tracing::info!("Creating crosscall.toml ");
     temp.create_crosscall_toml()?;
 
-    tracing::info!("Creating calculate.proto ...");
+    tracing::info!("Creating calculate.proto ");
     temp.create_proto_dir()?;
 
     temp.create_calculate()?;
@@ -970,7 +999,7 @@ fn new_project(dart: PathBuf, protoc: PathBuf, project_name: String) -> anyhow::
 
     protoc.check_version()?;
 
-    tracing::info!("Compiling protobuf ...");
+    tracing::info!("Compiling protobuf ");
     protoc.compile_dart(&["rpc/calculate.proto"], &[] as &[PathBuf], "lib/rpc")?;
 
     Ok(())

@@ -5,11 +5,11 @@ use std::{
     io,
     pin::Pin,
     sync::OnceLock,
-    task::{ready, Poll},
+    task::{ready, Poll}, time::Duration,
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    sync::{broadcast, mpsc, oneshot},
+    sync::{broadcast, mpsc::{self, error::TryRecvError}, oneshot},
     task::JoinHandle,
 };
 
@@ -41,7 +41,7 @@ impl Global {
     fn generate_id(&self) -> u32 {
         let mut lock = self.request_id.lock();
         let id = *lock;
-        *lock += 1;
+        *lock = id.wrapping_add(1);
         id
     }
 
@@ -491,7 +491,12 @@ pub extern "C" fn crosscall_destroy() {
     let g = GLOBAL.get().unwrap();
     if let Ok(size) = g.shutdown.send(sender) {
         for _ in 0..size {
-            receiver.blocking_recv();
+            let mut try_times = 3;
+            let sleep_duration = Duration::from_millis(300);
+            while Err(TryRecvError::Empty) == receiver.try_recv() && try_times > 0 { 
+                try_times -= 1;
+                std::thread::sleep(sleep_duration);
+            }
         }
     }
 
