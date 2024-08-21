@@ -376,12 +376,12 @@ edition = "2021"
 
 [dependencies]
 crosscall = "{}"
-tokio = {{ version = "*", features = ["full"] }}
-prost = "*"
-tonic = "*"
+tokio = {{ version = "1.39", features = ["full"] }}
+prost = "0.13.1"
+tonic = "0.12.1"
 
 [build-dependencies]
-tonic-build = "*"
+tonic-build = "0.12.1"
 
 [lib]
 crate-type = ["lib", "cdylib", "staticlib"]
@@ -533,6 +533,18 @@ class _MyHomePageState extends State<MyHomePage> {
         let path = self.cwd.join("lib").join("main.dart");
         std::fs::write(path, content)?;
         Ok(())
+    }
+
+    fn add_target_to_gitignore(&self) -> anyhow::Result<()> {
+
+        let path = self.cwd.join(".gitignore");
+
+        let mut file = std::fs::OpenOptions::new().write(true).append(true).open(path)?;
+
+        file.write_all(b"\n/target\n")?;
+        
+        Ok(())
+
     }
 
     fn create_native_hub_lib_rs(&self) -> anyhow::Result<()> {
@@ -1001,6 +1013,8 @@ fn new_project(dart: PathBuf, protoc: PathBuf, project_name: String) -> anyhow::
     temp.create_proto_dir()?;
 
     temp.create_calculate()?;
+
+    temp.add_target_to_gitignore()?;
 
     let mut protoc = ProtobufCompiler::new(protoc, current_dir.join(&project_name));
 

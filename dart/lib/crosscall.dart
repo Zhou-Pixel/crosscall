@@ -65,7 +65,8 @@ class Global {
   Map<int, StreamSink<List<int>>> _streams = {};
 
   Global._() {
-    DynamicLibrary library = DynamicLibrary.open(_defaultConfig.libPath);
+    var config = _defaultConfig ?? Config.defaultConfig();
+    DynamicLibrary library = DynamicLibrary.open(config.libPath);
     _writeToRust = library.lookupFunction<Void Function(Pointer, Int32),
         void Function(Pointer, int)>("crosscall_write_to_rust");
 
@@ -86,8 +87,7 @@ class Global {
 
     _receivePort = ReceivePort();
     _receivePort.listen(_message);
-    rustInitialize(
-        _receivePort.sendPort.nativePort, _defaultConfig.rustWorkerThread ?? 0);
+    rustInitialize(_receivePort.sendPort.nativePort, config.rustWorkerThread);
 
     start();
   }
@@ -238,6 +238,9 @@ class MemoryStream implements Stream<List<int>>, StreamSink<List<int>> {
 
         Global()._sendRequest(req, (global, res) {
           assert(res.id == req.id);
+          if (res.whichMsg() == protocol.Response_Msg.error) {
+            _sink.addError(SocketException(res.error.msg));
+          }
         });
       },
       onDone: () {
@@ -250,10 +253,13 @@ class MemoryStream implements Stream<List<int>>, StreamSink<List<int>> {
 
         Global()._sendRequest(req, (global, res) {
           assert(res.id == req.id);
+          if (res.whichMsg() == protocol.Response_Msg.error) {
+            _sink.addError(SocketException(res.error.msg));
+          }
         });
       },
-      onError: (Object Error) {
-        throw Error;
+      onError: (Object error) {
+        print("Got Error:  ${error}");
       },
     );
   }
@@ -469,11 +475,12 @@ class MemoryStream implements Stream<List<int>>, StreamSink<List<int>> {
 
 class Config {
   String libPath;
-  int? rustWorkerThread;
-  Config({required this.libPath, this.rustWorkerThread});
+  int rustWorkerThread = 0;
+  Config({required this.libPath, this.rustWorkerThread = 0});
+  static Config defaultConfig() => Config(libPath: defaultLibrayPath());
 }
 
-Config _defaultConfig = Config(libPath: defaultLibrayPath());
+Config? _defaultConfig;
 
 String defaultLibrayPath() {
   if (Platform.isLinux) {
