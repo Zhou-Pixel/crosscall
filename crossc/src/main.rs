@@ -90,14 +90,18 @@ impl Flutter {
     }
 
     fn check_version(&self) -> anyhow::Result<()> {
-        let mut cmd = process::Command::new(self.path.as_path());
+        let mut cmd = self.command();
         cmd.arg("--version");
 
         self.exec_command(&mut cmd)
     }
 
     fn create_project(&self, project_name: &str) -> anyhow::Result<()> {
-        let mut cmd = process::Command::new(self.path.as_path());
+        let path = self.cwd.join(project_name);
+        if path.exists() {
+            anyhow::bail!("{} alread exists", path.to_string_lossy());
+        }
+        let mut cmd = self.command();
 
         cmd.arg("create");
         cmd.arg(project_name);
@@ -170,12 +174,17 @@ fn exec_command(cmd: &mut process::Command) -> anyhow::Result<()> {
                 .join(std::ffi::OsStr::new(" "))
                 .to_string_lossy()
         );
-        let cwd = cmd.get_current_dir().map(|v| v.to_string_lossy());
+        let cwd = cmd.get_current_dir();
+
+        let cwd = match cwd {
+            Some(cwd) => cwd.to_path_buf(),
+            None => std::env::current_dir()?,
+        };
 
         anyhow::bail!(
-            "Failed to exec <{}> in <{:?}>:\n{}",
+            "Failed to exec <{}> in <{}>:\n{}",
             cmd_line,
-            cwd,
+            cwd.to_string_lossy(),
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -921,7 +930,7 @@ service Hello {
         include.push(parent.to_path_buf());
     }
 
-    tracing::info!("Compiling example protobuf ");
+    tracing::info!("Compiling example protobuf");
 
     protoc.add_dart_plugin_path()?;
     protoc.compile_dart(&[file.path()], &include, dir.path())?;

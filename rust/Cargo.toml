@@ -7,7 +7,7 @@ description = "dart and rust ffi call"
 repository = "https://github.com/Zhou-Pixel/crosscall.git"
 
 [dependencies]
-allo-isolate = "0.1"
+allo-isolate = { version = ">=0.1.25", features = ["zero-copy"] }
 parking_lot = "0.12"
 prost = "0.13"
 tokio = { version = "1.39", features = ["sync", "rt", "rt-multi-thread"] }

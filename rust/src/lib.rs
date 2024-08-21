@@ -1,4 +1,4 @@
-use allo_isolate::Isolate;
+use allo_isolate::{Isolate, ZeroCopyBuffer};
 use std::{
     collections::HashMap,
     future::Future,
@@ -28,7 +28,7 @@ mod protocol;
 
 #[derive(Debug)]
 struct Global {
-    isolate: parking_lot::Mutex<Isolate>, // maybe we can remove mutex here ??
+    isolate: Isolate, 
     waiter: parking_lot::Mutex<HashMap<u32, Waiter>>,
     streams: parking_lot::RwLock<HashMap<u32, mpsc::UnboundedSender<Vec<u8>>>>,
     listener: parking_lot::Mutex<HashMap<u32, mpsc::UnboundedSender<MemoryStream>>>,
@@ -69,7 +69,7 @@ impl Global {
         }
         .encode_to_vec();
 
-        if !self.isolate.lock().post(bytes) {
+        if !self.isolate.post(ZeroCopyBuffer(bytes)) {
             tracing::error!("Failed to post data to dart");
         }
     }
@@ -81,7 +81,7 @@ impl Global {
         }
         .encode_to_vec();
 
-        if !self.isolate.lock().post(bytes) {
+        if !self.isolate.post(ZeroCopyBuffer(bytes)) {
             tracing::error!("Failed to post data to dart");
         }
     }
@@ -507,7 +507,7 @@ pub extern "C" fn crosscall_destroy() {
 
 #[no_mangle]
 pub extern "C" fn crosscall_rust_initialize(port: i64, thread: u32) {
-    let isolate = parking_lot::Mutex::new(Isolate::new(port));
+    let isolate = Isolate::new(port);
 
     let runtime = match thread {
         0 => tokio::runtime::Builder::new_multi_thread()
