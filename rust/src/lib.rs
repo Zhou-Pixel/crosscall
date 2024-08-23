@@ -174,7 +174,7 @@ impl AsyncRead for MemoryStream {
                 }
             }
             None => {
-                tracing::error!("Memory got None message: {}", self.id);
+                tracing::error!("Memory stream got None message: {}", self.id);
                 return Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::ConnectionAborted,
                     "None msg receive",
@@ -484,6 +484,28 @@ pub unsafe extern "C" fn crosscall_write_to_rust(data: *mut u8, len: usize) {
 
 static GLOBAL: OnceLock<Global> = OnceLock::new();
 
+
+fn try_recv_timeout<T>(receiver: &mut mpsc::Receiver<T>, timeout: Duration) -> bool {
+    let start = std::time::Instant::now();
+
+    loop {
+        return match receiver.try_recv() {
+            Ok(_) => true,
+            Err(TryRecvError::Empty) => {
+                let now = std::time::Instant::now();
+                let offset = now - start;
+                if offset > timeout {
+                    return false;
+                } else {
+                    continue;
+                }
+            },
+            Err(TryRecvError::Disconnected) => true,
+        };
+    }
+
+}
+
 #[no_mangle]
 pub extern "C" fn crosscall_destroy() {
     let (sender, mut receiver) = mpsc::channel(128);
@@ -491,11 +513,13 @@ pub extern "C" fn crosscall_destroy() {
     let g = GLOBAL.get().unwrap();
     if let Ok(size) = g.shutdown.send(sender) {
         for _ in 0..size {
-            let mut try_times = 3;
-            let sleep_duration = Duration::from_millis(300);
-            while Err(TryRecvError::Empty) == receiver.try_recv() && try_times > 0 { 
-                try_times -= 1;
-                std::thread::sleep(sleep_duration);
+            let try_times = 3;
+            let timeout = Duration::from_millis(300);
+
+            for _ in 0..try_times {
+                if try_recv_timeout(&mut receiver, timeout) {
+                    break;
+                }
             }
         }
     }

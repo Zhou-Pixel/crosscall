@@ -7,9 +7,10 @@ import 'dart:isolate';
 
 import 'package:ffi/ffi.dart';
 import 'package:grpc/grpc_connection_interface.dart';
+import 'package:grpc/grpc.dart';
 import 'package:http2/transport.dart';
 
-import 'package:grpc/src/client/client_transport_connector.dart';
+// ignore: implementation_imports
 import 'package:grpc/src/client/http2_connection.dart';
 import 'package:crosscall/src/protocol/protocol.pb.dart' as protocol;
 
@@ -58,11 +59,11 @@ class Global {
   late void Function(Pointer, int) _writeToRust;
   late void Function() _destroy;
 
-  late ReceivePort _receivePort;
+  final ReceivePort _receivePort = ReceivePort();
   int _requestId = 0;
 
-  Map<int, void Function(Global, protocol.Response)> _waiters = {};
-  Map<int, StreamSink<List<int>>> _streams = {};
+  final Map<int, void Function(Global, protocol.Response)> _waiters = {};
+  final Map<int, StreamSink<List<int>>> _streams = {};
 
   Global._() {
     var config = _defaultConfig ?? Config.defaultConfig();
@@ -85,7 +86,6 @@ class Global {
     );
     storeDartPostCObject(NativeApi.postCObject);
 
-    _receivePort = ReceivePort();
     _receivePort.listen(_message);
     rustInitialize(_receivePort.sendPort.nativePort, config.rustWorkerThread);
 
@@ -183,7 +183,7 @@ class MemoryStream implements Stream<List<int>>, StreamSink<List<int>> {
   late int _channelId;
 
   late Stream<List<int>> _receiver;
-  late StreamController<List<int>> _sink = StreamController();
+  final StreamController<List<int>> _sink = StreamController();
 
   static Future<MemoryStream> connect(int listenerId) async {
     var id = Global()._nextId();
@@ -259,7 +259,7 @@ class MemoryStream implements Stream<List<int>>, StreamSink<List<int>> {
         });
       },
       onError: (Object error) {
-        print("Got Error:  ${error}");
+        print("Got Error:  $error");
       },
     );
   }
