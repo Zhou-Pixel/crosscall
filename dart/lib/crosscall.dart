@@ -16,7 +16,7 @@ import 'package:crosscall/src/protocol/protocol.pb.dart' as protocol;
 
 class TransportConnector extends ClientTransportConnector {
   int port;
-  late MemoryStream stream;
+  late final MemoryStream stream;
 
   TransportConnector(this.port);
   @override
@@ -140,6 +140,7 @@ class Global {
                       msg: "Channel ${req.channelClose.channelId} not found")));
           _writeMessageToRust(response);
         } else {
+          stream.close();
           var response = protocol.Message(
               response: protocol.Response(id: req.id, ok: protocol.Ok()));
           _writeMessageToRust(response);

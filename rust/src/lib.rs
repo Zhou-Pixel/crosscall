@@ -162,6 +162,7 @@ impl AsyncRead for MemoryStream {
         if !self.buf.is_empty() {
             let min = std::cmp::min(self.buf.len(), buf.remaining());
             buf.put(self.buf.split_to(min));
+            return std::task::Poll::Ready(Ok(()));
         }
         match ready!(self.receiver.poll_recv(cx)) {
             Some(data) => {
@@ -212,6 +213,7 @@ impl AsyncWrite for MemoryStream {
             let (sender, receiver) = oneshot::channel();
             let g = GLOBAL.get().unwrap();
             let id = g.generate_id();
+            tracing::info!("write data to flutter: req: {} id:{}, len: {}", id, self.id, buf.len());
             let msg = protocol::Request {
                 id,
                 msg: Some(protocol::request::Msg::ChannelData(protocol::ChannelData {
@@ -262,6 +264,7 @@ impl AsyncWrite for MemoryStream {
 
             g.insert_waiter(id, Waiter::Sender(sender));
 
+            tracing::info!("Memory stream shutdown: {}", self.id);
             g.send_request_to_dart(protocol::Request {
                 id,
                 msg: Some(protocol::request::Msg::ChannelClose(
@@ -384,6 +387,9 @@ pub unsafe extern "C" fn crosscall_write_to_rust(data: *mut u8, len: usize) {
                 return;
             };
             if let Some(msg) = res.msg {
+                if let protocol::response::Msg::Error(ref err) = msg {
+                    tracing::warn!("Got error response from flutter: {:?}", err);
+                }
                 match sender {
                     // Waiter::Func(func) => func(g, msg),
                     Waiter::Sender(sender) => {
@@ -426,14 +432,16 @@ pub unsafe extern "C" fn crosscall_write_to_rust(data: *mut u8, len: usize) {
                                 })),
                             })),
                         });
+                        tracing::debug!("Accept new stream id: {}", id);
                     } else {
                         g.send_response_to_dart(protocol::Response {
                             id: req.id,
                             msg: Some(protocol::response::Msg::Error(protocol::Error {
                                 code: protocol::error::Code::Unbind as _,
-                                msg: format!("Port {} is not bound", new_channel.listener_id),
+                                msg: format!("The current port is not bound: {}", new_channel.listener_id),
                             })),
                         });
+                        tracing::error!("No such listener: {}", new_channel.listener_id);
                     }
 
                     // g.send_response_to_dart(&protocol::Response { id, msg: })
@@ -452,12 +460,14 @@ pub unsafe extern "C" fn crosscall_write_to_rust(data: *mut u8, len: usize) {
                                 code: protocol::error::Code::ChannelNotFound as _,
                                 msg: format!("Channel: {} not found", data.channel_id),
                             })),
-                        })
+                        });
+                        tracing::error!("Try to send data to a non-exist channel: {}", data.channel_id);;
                     }
                 }
                 Some(protocol::request::Msg::ChannelClose(close)) => {
                     let g = GLOBAL.get().unwrap();
 
+                    tracing::debug!("Try to close channel: {}", close.channel_id);
                     if g.remove_stream(close.channel_id).is_some() {
                         g.send_response_to_dart(protocol::Response {
                             id: req.id,
